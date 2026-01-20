@@ -1,0 +1,114 @@
+# Unified conda environment for ice hockey player tracking pipeline
+# Resolves conflicts between vitpose, parseq2, and centroids environments
+
+name: unified_hockey
+
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  # Python
+  - python=3.10
+
+  # PyTorch (CUDA 11.8)
+  - pytorch=2.1
+  - torchvision=0.16
+  - torchaudio=2.1
+  - pytorch-cuda=11.8
+
+  # Core scientific computing
+  - numpy>=1.23,<2.0
+  - scipy>=1.10
+  - pandas>=2.0
+  - scikit-learn>=1.3
+
+  # Image/Video processing
+  - opencv>=4.8
+  - pillow>=10.0
+
+  # Visualization
+  - matplotlib>=3.7
+  - tqdm>=4.65
+
+  # Configuration
+  - pyyaml>=6.0
+  - omegaconf>=2.3
+  - hydra-core>=1.3
+
+  # Deep learning utilities
+  - einops>=0.6
+  - timm>=0.9
+
+  # Clustering
+  - hdbscan>=0.8.33
+
+  # Development
+  - pip
+
+  # Pip packages (not available in conda or need specific versions)
+  - pip:
+    # Ultralytics YOLO
+    - ultralytics>=8.0
+
+    # Segment Anything (SAM2)
+    - segment-anything-2>=0.1
+    # Fallback to SAM1 if SAM2 unavailable
+    - segment-anything>=1.0
+
+    # Transformers for SigLIP
+    - transformers>=4.35
+    - accelerate>=0.25
+
+    # Scene Text Recognition (PARSeq)
+    # Note: May need to install from source for hockey-specific model
+    - strhub>=0.1
+
+    # Pose estimation (ViTPose)
+    # Note: May need manual installation from mmpose
+    - mmcv>=2.0
+    - mmdet>=3.0
+    - mmpose>=1.0
+
+    # Re-ID features
+    - faiss-cpu>=1.7
+
+    # Additional utilities
+    - lap>=0.4  # Linear assignment
+    - cython_bbox>=0.1
+    - filterpy>=1.4  # Kalman filter
+
+    # Optional: Jupyter support
+    - jupyter>=1.0
+    - ipywidgets>=8.0
+
+# Post-installation notes:
+#
+# 1. Create environment:
+#    conda env create -f environment.yml
+#
+# 2. Activate:
+#    conda activate unified_hockey
+#
+# 3. Install CUTIE (video object segmentation):
+#    cd McByte/mask_propagation/Cutie && pip install -e .
+#
+# 4. Install cocoapi:
+#    pip install 'git+https://github.com/cocodataset/cocoapi.git#subdirectory=PythonAPI'
+#
+# 5. For ViTPose, you may need:
+#    pip install -U openmim
+#    mim install mmengine
+#    mim install "mmcv>=2.0.0"
+#    mim install "mmdet>=3.0.0"
+#    mim install "mmpose>=1.0.0"
+#
+# 6. Download model weights:
+#    - YOLO: hockey_yolo.pt
+#    - SAM2: facebook/sam2.1-hiera-large (auto-download)
+#    - CUTIE: mask_propagation/Cutie/weights/cutie-base-mega.pth
+#    - ViTPose: pose/ViTPose/checkpoints/vitpose-h.pth
+#    - PARSeq: models/parseq_hockey.ckpt
+#    - Legibility: models/legibility_resnet34_hockey.pth
