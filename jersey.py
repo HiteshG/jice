@@ -69,7 +69,6 @@ class LegibilityClassifier:
         """Load the legibility model."""
         try:
             self.model = models.resnet34(pretrained=False)
-            self.model.fc = nn.Linear(self.model.fc.in_features, 2)
 
             if Path(model_path).exists():
                 checkpoint = torch.load(model_path, map_location=self.device)
@@ -78,14 +77,28 @@ class LegibilityClassifier:
                 if all(k.startswith('model_ft.') for k in checkpoint.keys()):
                     checkpoint = {k.replace('model_ft.', ''): v for k, v in checkpoint.items()}
 
+                # Detect output size from checkpoint
+                fc_weight = checkpoint.get('fc.weight')
+                if fc_weight is not None:
+                    num_classes = fc_weight.shape[0]
+                    self.model.fc = nn.Linear(self.model.fc.in_features, num_classes)
+                else:
+                    # Default to binary classifier
+                    self.model.fc = nn.Linear(self.model.fc.in_features, 2)
+
                 self.model.load_state_dict(checkpoint)
+            else:
+                # No checkpoint, use binary classifier
+                self.model.fc = nn.Linear(self.model.fc.in_features, 2)
 
             self.model.to(self.device)
             self.model.eval()
+            self._is_binary = (self.model.fc.out_features == 2)
 
         except Exception as e:
             print(f"Warning: Failed to load legibility model: {e}")
             self.model = None
+            self._is_binary = True
 
     def predict(self, crop: np.ndarray, threshold: float = 0.5) -> Tuple[bool, float]:
         """
@@ -108,8 +121,15 @@ class LegibilityClassifier:
 
             with torch.no_grad():
                 output = self.model(tensor)
-                probs = F.softmax(output, dim=1)
-                legible_prob = probs[0, 1].item()
+
+                # Handle both binary and single-class models
+                if self._is_binary:
+                    # Binary classifier: [not_legible, legible]
+                    probs = F.softmax(output, dim=1)
+                    legible_prob = probs[0, 1].item()
+                else:
+                    # Single-class regression: direct confidence score
+                    legible_prob = torch.sigmoid(output[0, 0]).item()
 
             return legible_prob >= threshold, legible_prob
 

@@ -160,6 +160,7 @@ class SAM2CutieMaskManager:
 
             from omegaconf import open_dict
             from hydra import compose, initialize_config_dir
+            from hydra.core.global_hydra import GlobalHydra
 
             from cutie.model.cutie import CUTIE
             from cutie.inference.inference_core import InferenceCore
@@ -168,8 +169,11 @@ class SAM2CutieMaskManager:
             # Initialize Hydra config
             config_path = cutie_root / "cutie" / "config"
 
+            # Clear any existing Hydra instance (from SAM2 loading)
+            GlobalHydra.instance().clear()
+
             with torch.inference_mode():
-                with torch.cuda.amp.autocast(enabled=True):
+                with torch.amp.autocast('cuda', enabled=True):
                     initialize_config_dir(version_base='1.3.2', config_dir=str(config_path))
                     cfg = compose(config_name="eval_config")
 
