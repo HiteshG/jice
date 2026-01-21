@@ -154,8 +154,17 @@ class SAM2CutieMaskManager:
             import sys
             from pathlib import Path
 
+            # Resolve CUTIE root from checkpoint path
+            # e.g., /content/Cutie/weights/cutie-base-mega.pth -> /content/Cutie
+            weight_path = Path(self.config.cutie_checkpoint)
+            if weight_path.is_absolute():
+                # Derive CUTIE root from checkpoint: go up from weights/ dir
+                cutie_root = weight_path.parent.parent
+            else:
+                # Fallback to relative path from this file
+                cutie_root = Path(__file__).parent.parent / "McByte" / "mask_propagation" / "Cutie"
+
             # Add CUTIE to path
-            cutie_root = Path(__file__).parent.parent / "McByte" / "mask_propagation" / "Cutie"
             sys.path.insert(0, str(cutie_root))
 
             from omegaconf import open_dict
@@ -166,8 +175,10 @@ class SAM2CutieMaskManager:
             from cutie.inference.inference_core import InferenceCore
             from cutie.inference.utils.args_utils import get_dataset_cfg
 
-            # Initialize Hydra config
+            # Initialize Hydra config - look for cutie/config under CUTIE root
             config_path = cutie_root / "cutie" / "config"
+            if not config_path.exists():
+                raise FileNotFoundError(f"CUTIE config directory not found: {config_path}")
 
             # Clear any existing Hydra instance (from SAM2 loading)
             GlobalHydra.instance().clear()
@@ -176,11 +187,6 @@ class SAM2CutieMaskManager:
                 with torch.amp.autocast('cuda', enabled=True):
                     initialize_config_dir(version_base='1.3.2', config_dir=str(config_path))
                     cfg = compose(config_name="eval_config")
-
-                    # Set weights path
-                    weight_path = Path(self.config.cutie_checkpoint)
-                    if not weight_path.is_absolute():
-                        weight_path = Path(__file__).parent.parent / "McByte" / weight_path
 
                     with open_dict(cfg):
                         cfg['weights'] = str(weight_path)

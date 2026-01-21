@@ -114,6 +114,10 @@ class LegibilityClassifier:
         if self.model is None:
             return True, 1.0
 
+        # Validate crop
+        if crop is None or crop.size == 0 or crop.shape[0] == 0 or crop.shape[1] == 0:
+            return True, 1.0
+
         try:
             # Convert BGR to RGB
             rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
@@ -196,6 +200,10 @@ class PARSeqRecognizer:
         if self.model is None:
             return None, 0.0, []
 
+        # Validate crop
+        if crop is None or crop.size == 0 or crop.shape[0] == 0 or crop.shape[1] == 0:
+            return None, 0.0, []
+
         try:
             # Convert BGR to RGB
             rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
@@ -242,6 +250,10 @@ class PARSeqRecognizer:
             Tuple of (tens_logits, units_logits) as (11,) arrays
         """
         if self.model is None:
+            return np.zeros(11), np.zeros(11)
+
+        # Validate crop
+        if crop is None or crop.size == 0 or crop.shape[0] == 0 or crop.shape[1] == 0:
             return np.zeros(11), np.zeros(11)
 
         try:
@@ -306,6 +318,15 @@ class JerseyRecognizer:
         self.track_predictions.clear()
         self.locked_numbers.clear()
         self.lock_confidence.clear()
+
+    def reset_track(self, track_id: int) -> None:
+        """Reset temporal state for a specific track (for re-classification)."""
+        if track_id in self.track_predictions:
+            del self.track_predictions[track_id]
+        if track_id in self.locked_numbers:
+            del self.locked_numbers[track_id]
+        if track_id in self.lock_confidence:
+            del self.lock_confidence[track_id]
 
     def process_crop(
         self,

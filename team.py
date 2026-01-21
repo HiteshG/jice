@@ -90,12 +90,20 @@ class HybridTeamClassifier:
         Extract jersey region from player crop.
 
         Focuses on upper 60% (10%-60% vertically, 20%-80% horizontally).
+        Returns original crop if region would be empty.
         """
+        if crop is None or crop.size == 0 or crop.shape[0] < 2 or crop.shape[1] < 2:
+            return crop if crop is not None else np.zeros((1, 1, 3), dtype=np.uint8)
+
         h, w = crop.shape[:2]
         y1 = int(h * 0.1)
         y2 = int(h * 0.6)
         x1 = int(w * 0.2)
         x2 = int(w * 0.8)
+
+        # Ensure region is valid
+        if y2 <= y1 or x2 <= x1:
+            return crop
 
         return crop[y1:y2, x1:x2]
 
@@ -115,13 +123,21 @@ class HybridTeamClassifier:
         features = []
         with torch.no_grad():
             for crop in crops:
-                jersey = self.extract_jersey_region(crop)
-                rgb = cv2.cvtColor(jersey, cv2.COLOR_BGR2RGB)
-                tensor = self.transform(rgb).unsqueeze(0).to(self.device)
-                feat = self.model(tensor).cpu().numpy().flatten()
-                features.append(feat)
+                # Skip invalid crops
+                if crop is None or crop.size == 0 or crop.shape[0] < 2 or crop.shape[1] < 2:
+                    features.append(np.zeros(576))
+                    continue
 
-        return np.array(features)
+                try:
+                    jersey = self.extract_jersey_region(crop)
+                    rgb = cv2.cvtColor(jersey, cv2.COLOR_BGR2RGB)
+                    tensor = self.transform(rgb).unsqueeze(0).to(self.device)
+                    feat = self.model(tensor).cpu().numpy().flatten()
+                    features.append(feat)
+                except Exception:
+                    features.append(np.zeros(576))
+
+        return np.array(features) if features else np.zeros((0, 576))
 
     def extract_color_features(self, crops: List[np.ndarray]) -> np.ndarray:
         """
@@ -132,59 +148,72 @@ class HybridTeamClassifier:
         features = []
 
         for crop in crops:
-            jersey = self.extract_jersey_region(crop)
+            # Skip invalid crops
+            if crop is None or crop.size == 0 or crop.shape[0] < 2 or crop.shape[1] < 2:
+                features.append(np.zeros(49))
+                continue
 
-            # Convert to HSV and LAB
-            hsv = cv2.cvtColor(jersey, cv2.COLOR_BGR2HSV)
-            lab = cv2.cvtColor(jersey, cv2.COLOR_BGR2LAB)
+            try:
+                jersey = self.extract_jersey_region(crop)
 
-            # H histogram (18 bins)
-            h_hist = cv2.calcHist([hsv], [0], None, [18], [0, 180])
-            h_hist = h_hist.flatten() / (h_hist.sum() + 1e-6)
+                # Convert to HSV and LAB
+                hsv = cv2.cvtColor(jersey, cv2.COLOR_BGR2HSV)
+                lab = cv2.cvtColor(jersey, cv2.COLOR_BGR2LAB)
 
-            # S histogram (8 bins)
-            s_hist = cv2.calcHist([hsv], [1], None, [8], [0, 256])
-            s_hist = s_hist.flatten() / (s_hist.sum() + 1e-6)
+                # H histogram (18 bins)
+                h_hist = cv2.calcHist([hsv], [0], None, [18], [0, 180])
+                h_hist = h_hist.flatten() / (h_hist.sum() + 1e-6)
 
-            # V histogram (8 bins)
-            v_hist = cv2.calcHist([hsv], [2], None, [8], [0, 256])
-            v_hist = v_hist.flatten() / (v_hist.sum() + 1e-6)
+                # S histogram (8 bins)
+                s_hist = cv2.calcHist([hsv], [1], None, [8], [0, 256])
+                s_hist = s_hist.flatten() / (s_hist.sum() + 1e-6)
 
-            # HSV mean and std (6 dims)
-            hsv_mean = np.mean(hsv, axis=(0, 1)) / 255.0
-            hsv_std = np.std(hsv, axis=(0, 1)) / 255.0
+                # V histogram (8 bins)
+                v_hist = cv2.calcHist([hsv], [2], None, [8], [0, 256])
+                v_hist = v_hist.flatten() / (v_hist.sum() + 1e-6)
 
-            # LAB mean and std (6 dims)
-            lab_mean = np.mean(lab, axis=(0, 1)) / 255.0
-            lab_std = np.std(lab, axis=(0, 1)) / 255.0
+                # HSV mean and std (6 dims)
+                hsv_mean = np.mean(hsv, axis=(0, 1)) / 255.0
+                hsv_std = np.std(hsv, axis=(0, 1)) / 255.0
 
-            # Saturation ratios (2 dims)
-            s_channel = hsv[:, :, 1]
-            low_sat_ratio = np.mean(s_channel < 40) / 255.0
-            high_sat_ratio = np.mean(s_channel > 150) / 255.0
+                # LAB mean and std (6 dims)
+                lab_mean = np.mean(lab, axis=(0, 1)) / 255.0
+                lab_std = np.std(lab, axis=(0, 1)) / 255.0
 
-            # White ratio (1 dim)
-            white_ratio = self._compute_white_ratio(jersey)
+                # Saturation ratios (2 dims)
+                s_channel = hsv[:, :, 1]
+                low_sat_ratio = np.mean(s_channel < 40) / 255.0
+                high_sat_ratio = np.mean(s_channel > 150) / 255.0
 
-            # Concatenate all features (49 dims)
-            feat = np.concatenate([
-                h_hist, s_hist, v_hist,  # 34
-                hsv_mean, hsv_std,        # 6
-                lab_mean, lab_std,        # 6
-                [low_sat_ratio, high_sat_ratio],  # 2
-                [white_ratio]             # 1
-            ])
+                # White ratio (1 dim)
+                white_ratio = self._compute_white_ratio(jersey)
 
-            features.append(feat)
+                # Concatenate all features (49 dims)
+                feat = np.concatenate([
+                    h_hist, s_hist, v_hist,  # 34
+                    hsv_mean, hsv_std,        # 6
+                    lab_mean, lab_std,        # 6
+                    [low_sat_ratio, high_sat_ratio],  # 2
+                    [white_ratio]             # 1
+                ])
 
-        return np.array(features)
+                features.append(feat)
+            except Exception:
+                features.append(np.zeros(49))
+
+        return np.array(features) if features else np.zeros((0, 49))
 
     def _compute_white_ratio(self, crop: np.ndarray) -> float:
         """Compute ratio of white pixels."""
-        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-        # White: low saturation, high value
-        white_mask = (hsv[:, :, 1] < 30) & (hsv[:, :, 2] > 200)
-        return np.mean(white_mask)
+        if crop is None or crop.size == 0 or crop.shape[0] < 1 or crop.shape[1] < 1:
+            return 0.0
+        try:
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+            # White: low saturation, high value
+            white_mask = (hsv[:, :, 1] < 30) & (hsv[:, :, 2] > 200)
+            return np.mean(white_mask)
+        except Exception:
+            return 0.0
 
     def extract_all_features(self, crops: List[np.ndarray]) -> np.ndarray:
         """
@@ -307,24 +336,32 @@ class HybridTeamClassifier:
         predictions = []
 
         for crop in crops:
-            jersey = self.extract_jersey_region(crop)
-            white_ratio = self._compute_white_ratio(jersey)
+            # Skip invalid crops
+            if crop is None or crop.size == 0 or crop.shape[0] < 2 or crop.shape[1] < 2:
+                predictions.append(TeamAssignment(team_id=-1, confidence=0.0, method="invalid"))
+                continue
 
-            # Compute average saturation
-            hsv = cv2.cvtColor(jersey, cv2.COLOR_BGR2HSV)
-            avg_saturation = np.mean(hsv[:, :, 1])
+            try:
+                jersey = self.extract_jersey_region(crop)
+                white_ratio = self._compute_white_ratio(jersey)
 
-            if white_ratio > self.config.white_ratio_threshold or \
-               avg_saturation < self.config.low_saturation_threshold:
-                team_id = 0  # Away/white
-            else:
-                team_id = 1  # Home/colored
+                # Compute average saturation
+                hsv = cv2.cvtColor(jersey, cv2.COLOR_BGR2HSV)
+                avg_saturation = np.mean(hsv[:, :, 1])
 
-            predictions.append(TeamAssignment(
-                team_id=team_id,
-                confidence=0.6,
-                method="fallback"
-            ))
+                if white_ratio > self.config.white_ratio_threshold or \
+                   avg_saturation < self.config.low_saturation_threshold:
+                    team_id = 0  # Away/white
+                else:
+                    team_id = 1  # Home/colored
+
+                predictions.append(TeamAssignment(
+                    team_id=team_id,
+                    confidence=0.6,
+                    method="fallback"
+                ))
+            except Exception:
+                predictions.append(TeamAssignment(team_id=-1, confidence=0.0, method="error"))
 
         if tracker_ids is not None:
             predictions = self._apply_temporal_consistency(predictions, tracker_ids)
@@ -471,25 +508,34 @@ class RobustTeamClassifier:
             dim = 768 if self.processor else 576
             return np.zeros((len(crops), dim))
 
+        dim = 768 if self.processor else 576
         features = []
         with torch.no_grad():
             for crop in crops:
-                rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                # Skip invalid crops
+                if crop is None or crop.size == 0 or crop.shape[0] < 2 or crop.shape[1] < 2:
+                    features.append(np.zeros(dim))
+                    continue
 
-                if self.processor:
-                    # SigLIP
-                    inputs = self.processor(images=rgb, return_tensors="pt")
-                    inputs = {k: v.to(self.device) for k, v in inputs.items()}
-                    outputs = self.model.get_image_features(**inputs)
-                    feat = outputs.cpu().numpy().flatten()
-                else:
-                    # MobileNet fallback
-                    tensor = self.transform(rgb).unsqueeze(0).to(self.device)
-                    feat = self.model(tensor).cpu().numpy().flatten()
+                try:
+                    rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
 
-                features.append(feat)
+                    if self.processor:
+                        # SigLIP
+                        inputs = self.processor(images=rgb, return_tensors="pt")
+                        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                        outputs = self.model.get_image_features(**inputs)
+                        feat = outputs.cpu().numpy().flatten()
+                    else:
+                        # MobileNet fallback
+                        tensor = self.transform(rgb).unsqueeze(0).to(self.device)
+                        feat = self.model(tensor).cpu().numpy().flatten()
 
-        return np.array(features)
+                    features.append(feat)
+                except Exception:
+                    features.append(np.zeros(dim))
+
+        return np.array(features) if features else np.zeros((0, dim))
 
     def extract_color_features(self, crops: List[np.ndarray]) -> np.ndarray:
         """
@@ -500,48 +546,61 @@ class RobustTeamClassifier:
         features = []
 
         for crop in crops:
-            h, w = crop.shape[:2]
+            # Skip invalid crops
+            if crop is None or crop.size == 0 or crop.shape[0] < 2 or crop.shape[1] < 2:
+                features.append(np.zeros(43))
+                continue
 
-            # Focus on jersey region
-            y1, y2 = int(h * 0.1), int(h * 0.6)
-            x1, x2 = int(w * 0.2), int(w * 0.8)
-            jersey = crop[y1:y2, x1:x2]
+            try:
+                h, w = crop.shape[:2]
 
-            hsv = cv2.cvtColor(jersey, cv2.COLOR_BGR2HSV)
-            lab = cv2.cvtColor(jersey, cv2.COLOR_BGR2LAB)
+                # Focus on jersey region
+                y1, y2 = int(h * 0.1), int(h * 0.6)
+                x1, x2 = int(w * 0.2), int(w * 0.8)
 
-            # H histogram (18 bins)
-            h_hist = cv2.calcHist([hsv], [0], None, [18], [0, 180])
-            h_hist = h_hist.flatten() / (h_hist.sum() + 1e-6)
+                # Ensure valid region
+                if y2 <= y1 or x2 <= x1:
+                    jersey = crop
+                else:
+                    jersey = crop[y1:y2, x1:x2]
 
-            # S histogram (16 bins)
-            s_hist = cv2.calcHist([hsv], [1], None, [16], [0, 256])
-            s_hist = s_hist.flatten() / (s_hist.sum() + 1e-6)
+                hsv = cv2.cvtColor(jersey, cv2.COLOR_BGR2HSV)
+                lab = cv2.cvtColor(jersey, cv2.COLOR_BGR2LAB)
 
-            # HSV mean (3 dims)
-            hsv_mean = np.mean(hsv, axis=(0, 1)) / 255.0
+                # H histogram (18 bins)
+                h_hist = cv2.calcHist([hsv], [0], None, [18], [0, 180])
+                h_hist = h_hist.flatten() / (h_hist.sum() + 1e-6)
 
-            # LAB mean (3 dims)
-            lab_mean = np.mean(lab, axis=(0, 1)) / 255.0
+                # S histogram (16 bins)
+                s_hist = cv2.calcHist([hsv], [1], None, [16], [0, 256])
+                s_hist = s_hist.flatten() / (s_hist.sum() + 1e-6)
 
-            # Saturation ratios (3 dims)
-            s_channel = hsv[:, :, 1]
-            low_sat = np.mean(s_channel < 40)
-            mid_sat = np.mean((s_channel >= 40) & (s_channel < 150))
-            high_sat = np.mean(s_channel >= 150)
+                # HSV mean (3 dims)
+                hsv_mean = np.mean(hsv, axis=(0, 1)) / 255.0
 
-            # Concatenate (43 dims)
-            feat = np.concatenate([
-                h_hist,  # 18
-                s_hist,  # 16
-                hsv_mean,  # 3
-                lab_mean,  # 3
-                [low_sat, mid_sat, high_sat]  # 3
-            ])
+                # LAB mean (3 dims)
+                lab_mean = np.mean(lab, axis=(0, 1)) / 255.0
 
-            features.append(feat)
+                # Saturation ratios (3 dims)
+                s_channel = hsv[:, :, 1]
+                low_sat = np.mean(s_channel < 40)
+                mid_sat = np.mean((s_channel >= 40) & (s_channel < 150))
+                high_sat = np.mean(s_channel >= 150)
 
-        return np.array(features)
+                # Concatenate (43 dims)
+                feat = np.concatenate([
+                    h_hist,  # 18
+                    s_hist,  # 16
+                    hsv_mean,  # 3
+                    lab_mean,  # 3
+                    [low_sat, mid_sat, high_sat]  # 3
+                ])
+
+                features.append(feat)
+            except Exception:
+                features.append(np.zeros(43))
+
+        return np.array(features) if features else np.zeros((0, 43))
 
     def extract_multimodal_features(self, crops: List[np.ndarray]) -> np.ndarray:
         """
@@ -603,14 +662,26 @@ class RobustTeamClassifier:
             if label == -1:  # Outlier
                 continue
 
-            # Compute white ratio
-            h, w = crop.shape[:2]
-            jersey = crop[int(h*0.1):int(h*0.6), int(w*0.2):int(w*0.8)]
-            hsv = cv2.cvtColor(jersey, cv2.COLOR_BGR2HSV)
-            white_mask = (hsv[:, :, 1] < 30) & (hsv[:, :, 2] > 200)
-            white_ratio = np.mean(white_mask)
+            # Skip invalid crops
+            if crop is None or crop.size == 0 or crop.shape[0] < 2 or crop.shape[1] < 2:
+                continue
 
-            cluster_white_ratios[label].append(white_ratio)
+            try:
+                # Compute white ratio
+                h, w = crop.shape[:2]
+                y1, y2 = int(h*0.1), int(h*0.6)
+                x1, x2 = int(w*0.2), int(w*0.8)
+                if y2 > y1 and x2 > x1:
+                    jersey = crop[y1:y2, x1:x2]
+                else:
+                    jersey = crop
+                hsv = cv2.cvtColor(jersey, cv2.COLOR_BGR2HSV)
+                white_mask = (hsv[:, :, 1] < 30) & (hsv[:, :, 2] > 200)
+                white_ratio = np.mean(white_mask)
+
+                cluster_white_ratios[label].append(white_ratio)
+            except Exception:
+                continue
 
         # Map clusters to teams
         mean_ratios = {}
@@ -689,24 +760,36 @@ class RobustTeamClassifier:
 
     def _fallback_single(self, crop: np.ndarray) -> TeamAssignment:
         """Classify single crop using color heuristics."""
-        h, w = crop.shape[:2]
-        jersey = crop[int(h*0.1):int(h*0.6), int(w*0.2):int(w*0.8)]
+        # Validate crop
+        if crop is None or crop.size == 0 or crop.shape[0] < 2 or crop.shape[1] < 2:
+            return TeamAssignment(team_id=-1, confidence=0.0, method="invalid")
 
-        hsv = cv2.cvtColor(jersey, cv2.COLOR_BGR2HSV)
-        white_mask = (hsv[:, :, 1] < 30) & (hsv[:, :, 2] > 200)
-        white_ratio = np.mean(white_mask)
-        avg_sat = np.mean(hsv[:, :, 1])
+        try:
+            h, w = crop.shape[:2]
+            y1, y2 = int(h*0.1), int(h*0.6)
+            x1, x2 = int(w*0.2), int(w*0.8)
+            if y2 > y1 and x2 > x1:
+                jersey = crop[y1:y2, x1:x2]
+            else:
+                jersey = crop
 
-        if white_ratio > 0.3 or avg_sat < 40:
-            team_id = 0
-        else:
-            team_id = 1
+            hsv = cv2.cvtColor(jersey, cv2.COLOR_BGR2HSV)
+            white_mask = (hsv[:, :, 1] < 30) & (hsv[:, :, 2] > 200)
+            white_ratio = np.mean(white_mask)
+            avg_sat = np.mean(hsv[:, :, 1])
 
-        return TeamAssignment(
-            team_id=team_id,
-            confidence=0.5,
-            method="fallback"
-        )
+            if white_ratio > 0.3 or avg_sat < 40:
+                team_id = 0
+            else:
+                team_id = 1
+
+            return TeamAssignment(
+                team_id=team_id,
+                confidence=0.5,
+                method="fallback"
+            )
+        except Exception:
+            return TeamAssignment(team_id=-1, confidence=0.0, method="error")
 
     def _apply_temporal_consistency(
         self,

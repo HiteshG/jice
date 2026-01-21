@@ -9,6 +9,7 @@ Multi-pass offline pipeline:
 5. Video annotation + MOT output
 """
 
+from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Iterator
 import numpy as np
@@ -24,8 +25,8 @@ from .mask_sam2_cutie import SAM2CutieMaskManager, create_mask_manager
 from .jersey import JerseyRecognizer, create_jersey_recognizer
 from .team import TeamClassifier, create_team_classifier
 from .multipass import (
-    TrackMerger, TrackInterpolator,
-    create_track_merger, create_track_interpolator,
+    TrackMerger, TrackInterpolator, PostJerseyMerger,
+    create_track_merger, create_track_interpolator, create_post_jersey_merger,
     convert_stracks_to_tracks, merge_frame_tracks
 )
 from .annotator import VideoAnnotator, MOTWriter, VideoWriter, create_annotator
@@ -60,6 +61,7 @@ class UnifiedPipeline:
 
         self.track_merger = create_track_merger(config.multipass)
         self.track_interpolator = create_track_interpolator(config.multipass)
+        self.post_jersey_merger = create_post_jersey_merger()
         self.annotator = create_annotator(config.annotation)
 
         # Video metadata
@@ -113,10 +115,29 @@ class UnifiedPipeline:
         if self.verbose:
             print(f"  Tracks after merge: {len(merged_tracks)}")
 
-        # PASS 4: Jersey + Team classification
+        # PASS 4: Initial Jersey + Team classification
         if self.verbose:
-            print("\n=== PASS 4: Jersey + Team Classification ===")
+            print("\n=== PASS 4: Initial Jersey + Team Classification ===")
         self._classify_tracks(merged_tracks, video_path)
+
+        # PASS 5: Post-Jersey Merge (merge tracks with same jersey + team)
+        if self.verbose:
+            print("\n=== PASS 5: Post-Jersey Track Consolidation ===")
+        final_tracks, merge_mapping = self.post_jersey_merger.merge_by_jersey(merged_tracks)
+
+        # Count how many merges occurred
+        merges_count = len(set(merge_mapping.values()))
+        original_count = len(merge_mapping)
+        if self.verbose:
+            merged_count = original_count - merges_count
+            print(f"  Merged {merged_count} tracks based on jersey+team matching")
+            print(f"  Final track count: {len(final_tracks)}")
+
+        # PASS 6: Re-run jersey detection on merged tracks for better accuracy
+        if merged_count > 0:
+            if self.verbose:
+                print("\n=== PASS 6: Re-classify Merged Tracks ===")
+            self._reclassify_merged_tracks(final_tracks, merge_mapping, video_path)
 
         # Generate outputs
         if self.verbose:
@@ -125,9 +146,9 @@ class UnifiedPipeline:
         if output_path is None:
             output_path = str(Path(video_path).with_suffix('')) + "_tracked.mp4"
 
-        self._generate_outputs(video_path, output_path, merged_tracks)
+        self._generate_outputs(video_path, output_path, final_tracks)
 
-        return merged_tracks
+        return final_tracks
 
     def _run_tracking_pass(
         self,
@@ -228,7 +249,13 @@ class UnifiedPipeline:
         self.jersey_recognizer.reset()
         self.team_classifier.reset()
 
-        # Collect all crops for team clustering
+        # Sampling parameters for performance
+        MAX_CROPS_TEAM_FIT = 200  # Max total crops for team clustering fit
+        MAX_CROPS_PER_TRACK_JERSEY = 30  # Max crops per track for jersey recognition
+        MAX_CROPS_PER_TRACK_TEAM = 20  # Max crops per track for team classification
+        SAMPLE_STRIDE = 5  # Sample every Nth crop
+
+        # Collect sampled crops for team clustering
         all_player_crops = []
         player_track_ids = []
 
@@ -239,8 +266,16 @@ class UnifiedPipeline:
 
             crops = track.get_crops()
             if crops:
-                all_player_crops.extend(crops)
-                player_track_ids.extend([track_id] * len(crops))
+                # Sample crops: every Nth frame, capped
+                sampled = crops[::SAMPLE_STRIDE][:MAX_CROPS_PER_TRACK_TEAM]
+                all_player_crops.extend(sampled)
+                player_track_ids.extend([track_id] * len(sampled))
+
+        # Cap total crops for fitting
+        if len(all_player_crops) > MAX_CROPS_TEAM_FIT:
+            indices = np.linspace(0, len(all_player_crops) - 1, MAX_CROPS_TEAM_FIT, dtype=int)
+            all_player_crops = [all_player_crops[i] for i in indices]
+            player_track_ids = [player_track_ids[i] for i in indices]
 
         # Fit team classifier
         if all_player_crops:
@@ -256,20 +291,84 @@ class UnifiedPipeline:
             if not crops:
                 continue
 
+            # Sample crops for jersey recognition (more samples needed for accuracy)
+            jersey_crops = crops[::SAMPLE_STRIDE][:MAX_CROPS_PER_TRACK_JERSEY]
+
             # Jersey recognition
-            jersey_number = self.jersey_recognizer.process_tracklet(crops, track_id)
+            jersey_number = self.jersey_recognizer.process_tracklet(jersey_crops, track_id)
             track.jersey_number = jersey_number
 
             pred = self.jersey_recognizer.get_prediction(track_id)
             track.jersey_confidence = pred.confidence
 
+            # Sample crops for team classification
+            team_crops = crops[::SAMPLE_STRIDE][:MAX_CROPS_PER_TRACK_TEAM]
+
             # Team classification
-            team_assignments = self.team_classifier.predict(crops, [track_id] * len(crops))
+            team_assignments = self.team_classifier.predict(team_crops, [track_id] * len(team_crops))
             if team_assignments:
-                # Use most common assignment
-                teams = [a.team_id for a in team_assignments]
-                track.team_id = max(set(teams), key=teams.count)
-                track.team_confidence = np.mean([a.confidence for a in team_assignments])
+                # Filter out invalid assignments
+                valid_teams = [a.team_id for a in team_assignments if a.team_id >= 0]
+                if valid_teams:
+                    track.team_id = max(set(valid_teams), key=valid_teams.count)
+                    track.team_confidence = np.mean([a.confidence for a in team_assignments if a.team_id >= 0])
+
+    def _reclassify_merged_tracks(
+        self,
+        tracks: Dict[int, Track],
+        merge_mapping: Dict[int, int],
+        video_path: str
+    ) -> None:
+        """
+        Re-run jersey detection on tracks that were merged.
+
+        Merged tracks have more frames/crops, which should give better
+        jersey number predictions.
+
+        Args:
+            tracks: Dictionary of merged tracks
+            merge_mapping: Mapping from original track IDs to merged track IDs
+            video_path: Path to video (for logging)
+        """
+        # Find track IDs that received merges (have multiple source tracks)
+        merge_counts = defaultdict(int)
+        for orig_id, merged_id in merge_mapping.items():
+            merge_counts[merged_id] += 1
+
+        merged_track_ids = {tid for tid, count in merge_counts.items() if count > 1}
+
+        if not merged_track_ids:
+            return
+
+        # Sampling parameters (use more samples for merged tracks)
+        MAX_CROPS_MERGED = 50  # More crops for better accuracy
+        SAMPLE_STRIDE = 3  # Sample more frequently
+
+        # Re-classify only merged tracks
+        for track_id in tqdm(merged_track_ids, desc="Re-classifying merged",
+                            disable=not self.verbose):
+            if track_id not in tracks:
+                continue
+
+            track = tracks[track_id]
+            crops = track.get_crops()
+
+            if not crops:
+                continue
+
+            # Sample crops for jersey recognition
+            jersey_crops = crops[::SAMPLE_STRIDE][:MAX_CROPS_MERGED]
+
+            # Re-run jersey recognition with fresh state for this track
+            self.jersey_recognizer.reset_track(track_id)
+            jersey_number = self.jersey_recognizer.process_tracklet(jersey_crops, track_id)
+            track.jersey_number = jersey_number
+
+            pred = self.jersey_recognizer.get_prediction(track_id)
+            track.jersey_confidence = pred.confidence
+
+            if self.verbose and track.jersey_number is not None:
+                print(f"    Track {track_id}: Jersey #{track.jersey_number} (conf: {track.jersey_confidence:.2f})")
 
     def _generate_outputs(
         self,

@@ -126,8 +126,12 @@ class Track:
         return None
 
     def get_crops(self) -> List[np.ndarray]:
-        """Get all non-None crops from the tracklet."""
-        return [f.crop for f in self.frames.values() if f.crop is not None]
+        """Get all valid (non-None, non-empty) crops from the tracklet."""
+        crops = []
+        for f in self.frames.values():
+            if f.crop is not None and f.crop.size > 0 and f.crop.shape[0] > 0 and f.crop.shape[1] > 0:
+                crops.append(f.crop)
+        return crops
 
     def get_features(self) -> Optional[np.ndarray]:
         """Get stacked features array from all frames."""

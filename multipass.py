@@ -407,3 +407,193 @@ def create_track_interpolator(config: Optional[MultiPassConfig] = None) -> Track
     if config is None:
         config = MultiPassConfig()
     return TrackInterpolator(config)
+
+
+class PostJerseyMerger:
+    """
+    Merges tracks based on jersey number and team classification.
+
+    After initial jersey detection, tracks with the same jersey number
+    and team (that don't overlap in time) are likely the same player
+    who got a new track ID due to occlusion or leaving the frame.
+    """
+
+    def __init__(self, min_confidence: float = 0.3, max_overlap_frames: int = 5):
+        """
+        Initialize the post-jersey merger.
+
+        Args:
+            min_confidence: Minimum jersey confidence to consider for merging
+            max_overlap_frames: Max allowed frame overlap (for handling noise)
+        """
+        self.min_confidence = min_confidence
+        self.max_overlap_frames = max_overlap_frames
+
+    def merge_by_jersey(self, tracks: Dict[int, Track]) -> Tuple[Dict[int, Track], Dict[int, int]]:
+        """
+        Merge tracks that have the same jersey number and team.
+
+        Only merges non-overlapping tracks (or tracks with minimal overlap).
+
+        Args:
+            tracks: Dictionary of tracks with jersey/team assignments
+
+        Returns:
+            Tuple of (merged_tracks, merge_mapping) where merge_mapping shows
+            which original track IDs were merged into which final track ID
+        """
+        if not tracks:
+            return {}, {}
+
+        # Group tracks by (jersey_number, team_id, class_id)
+        jersey_groups: Dict[Tuple, List[int]] = defaultdict(list)
+
+        for track_id, track in tracks.items():
+            # Only consider tracks with confident jersey predictions
+            if track.jersey_number is not None and track.jersey_confidence >= self.min_confidence:
+                # Players and goalies only (class_id 0 and 1)
+                if track.class_id in [0, 1] and track.team_id is not None and track.team_id >= 0:
+                    key = (track.jersey_number, track.team_id, track.class_id)
+                    jersey_groups[key].append(track_id)
+
+        # Find mergeable tracks within each group
+        merge_mapping: Dict[int, int] = {}  # original_id -> merged_id
+        merged_tracks: Dict[int, Track] = {}
+        processed_ids: set = set()
+
+        for key, track_ids in jersey_groups.items():
+            if len(track_ids) < 2:
+                continue
+
+            # Sort by start frame
+            sorted_ids = sorted(track_ids, key=lambda tid: tracks[tid].start_frame)
+
+            # Greedily merge non-overlapping tracks
+            merge_chains = self._find_merge_chains(tracks, sorted_ids)
+
+            for chain in merge_chains:
+                if len(chain) > 1:
+                    # Merge all tracks in the chain into the first one
+                    primary_id = chain[0]
+                    merged = self._merge_track_chain(tracks, chain)
+
+                    # Record merge mapping
+                    for tid in chain:
+                        merge_mapping[tid] = primary_id
+                        processed_ids.add(tid)
+
+                    merged_tracks[primary_id] = merged
+
+        # Add unprocessed tracks as-is
+        for track_id, track in tracks.items():
+            if track_id not in processed_ids:
+                merged_tracks[track_id] = track
+                merge_mapping[track_id] = track_id
+
+        return merged_tracks, merge_mapping
+
+    def _find_merge_chains(
+        self,
+        tracks: Dict[int, Track],
+        track_ids: List[int]
+    ) -> List[List[int]]:
+        """
+        Find chains of tracks that can be merged (non-overlapping).
+
+        Returns list of merge chains, where each chain is a list of track IDs
+        that should be merged together.
+        """
+        chains: List[List[int]] = []
+        used = set()
+
+        for start_id in track_ids:
+            if start_id in used:
+                continue
+
+            chain = [start_id]
+            used.add(start_id)
+            current_end = tracks[start_id].end_frame
+
+            # Find next non-overlapping track
+            for next_id in track_ids:
+                if next_id in used:
+                    continue
+
+                next_start = tracks[next_id].start_frame
+                overlap = current_end - next_start + 1
+
+                # Allow merge if minimal or no overlap
+                if overlap <= self.max_overlap_frames:
+                    chain.append(next_id)
+                    used.add(next_id)
+                    current_end = tracks[next_id].end_frame
+
+            chains.append(chain)
+
+        return chains
+
+    def _merge_track_chain(
+        self,
+        tracks: Dict[int, Track],
+        chain: List[int]
+    ) -> Track:
+        """
+        Merge a chain of tracks into a single track.
+
+        Args:
+            tracks: Original tracks dictionary
+            chain: List of track IDs to merge
+
+        Returns:
+            Merged Track object
+        """
+        primary = tracks[chain[0]]
+
+        merged = Track(
+            track_id=primary.track_id,
+            class_id=primary.class_id,
+            state=primary.state,
+            # Keep jersey/team from most confident prediction
+            jersey_number=primary.jersey_number,
+            jersey_confidence=primary.jersey_confidence,
+            team_id=primary.team_id,
+            team_confidence=primary.team_confidence
+        )
+
+        # Collect all frames and find best jersey/team predictions
+        best_jersey_conf = primary.jersey_confidence or 0
+        best_team_conf = primary.team_confidence or 0
+
+        for tid in chain:
+            track = tracks[tid]
+
+            # Update best jersey prediction
+            if track.jersey_confidence and track.jersey_confidence > best_jersey_conf:
+                best_jersey_conf = track.jersey_confidence
+                merged.jersey_number = track.jersey_number
+                merged.jersey_confidence = track.jersey_confidence
+
+            # Update best team prediction
+            if track.team_confidence and track.team_confidence > best_team_conf:
+                best_team_conf = track.team_confidence
+                merged.team_id = track.team_id
+                merged.team_confidence = track.team_confidence
+
+            # Merge frames (prefer higher score for overlapping frames)
+            for frame_id, frame_data in track.frames.items():
+                if frame_id not in merged.frames:
+                    merged.frames[frame_id] = frame_data
+                else:
+                    existing = merged.frames[frame_id]
+                    if frame_data.score > existing.score:
+                        merged.frames[frame_id] = frame_data
+
+        return merged
+
+
+def create_post_jersey_merger(
+    min_confidence: float = 0.3,
+    max_overlap_frames: int = 5
+) -> PostJerseyMerger:
+    """Factory function for PostJerseyMerger."""
+    return PostJerseyMerger(min_confidence, max_overlap_frames)
