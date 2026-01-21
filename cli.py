@@ -81,8 +81,8 @@ Examples:
     parser.add_argument(
         "--model",
         type=str,
-        default="hockey_yolo.pt",
-        help="Path to YOLO model (default: hockey_yolo.pt)"
+        default=None,
+        help="Path to YOLO model (uses config value if not specified)"
     )
     parser.add_argument(
         "--imgsz",
@@ -184,7 +184,8 @@ def build_config(args: argparse.Namespace) -> PipelineConfig:
     config.save_debug_info = args.debug
 
     # Detection
-    config.detection.model_path = args.model
+    if args.model is not None:
+        config.detection.model_path = args.model
     config.detection.imgsz = args.imgsz
     config.detection.player_confidence = args.conf
     config.detection.device = args.device
