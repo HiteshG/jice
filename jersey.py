@@ -73,6 +73,11 @@ class LegibilityClassifier:
 
             if Path(model_path).exists():
                 checkpoint = torch.load(model_path, map_location=self.device)
+
+                # Handle state dict with 'model_ft.' prefix
+                if all(k.startswith('model_ft.') for k in checkpoint.keys()):
+                    checkpoint = {k.replace('model_ft.', ''): v for k, v in checkpoint.items()}
+
                 self.model.load_state_dict(checkpoint)
 
             self.model.to(self.device)

@@ -52,7 +52,7 @@ class DetectionConfig:
     referee_confidence: float = 0.4
     puck_confidence: float = 0.2  # Lower threshold for small puck
     device: str = "cuda"
-    half: bool = True  # FP16 inference
+    half: bool = False  # FP16 inference (disabled by default to avoid dtype issues)
 
 
 @dataclass

@@ -78,14 +78,31 @@ class SAM2CutieMaskManager:
             # Try loading SAM2 from the real-time fork
             # https://github.com/Gy920/segment-anything-2-real-time
             from sam2.build_sam import build_sam2_camera_predictor
+            from hydra import initialize_config_dir, compose
+            from hydra.core.global_hydra import GlobalHydra
 
             # Resolve paths
             sam2_checkpoint = self.config.sam2_checkpoint or DEFAULT_SAM2_CHECKPOINT
-            sam2_config = self.config.sam2_config or DEFAULT_SAM2_CONFIG
+            sam2_config_path = self.config.sam2_config or DEFAULT_SAM2_CONFIG
+
+            # If absolute path provided, extract just the config name and set up Hydra
+            if Path(sam2_config_path).is_absolute():
+                # Set up Hydra to search in the SAM2 configs directory
+                config_dir = Path(sam2_config_path).parent
+                config_name = Path(sam2_config_path).stem
+            else:
+                # Assume it's relative to sam2 repo root
+                sam2_root = self.config.sam2_root or Path(sam2_checkpoint).parent.parent
+                config_dir = Path(sam2_root) / "sam2" / "configs" / "sam2.1"
+                config_name = Path(sam2_config_path).stem
+
+            # Initialize Hydra with SAM2 config directory
+            GlobalHydra.instance().clear()
+            initialize_config_dir(version_base="1.2", config_dir=str(config_dir))
 
             # Build SAM2 camera predictor (optimized for real-time)
             self.sam2_predictor = build_sam2_camera_predictor(
-                sam2_config,
+                config_name,
                 sam2_checkpoint,
                 device=self.device
             )
